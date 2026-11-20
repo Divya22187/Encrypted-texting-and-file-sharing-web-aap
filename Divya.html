@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SecureChat</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--tx:#1b1f24;--mut:#6a727c;--bd:#dde1e6;--ac:#2563eb;--me:#d6e4ff;--ok:#16794a;--warn:#b45309}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#111418;--card:#1a1e24;--tx:#e8eaed;--mut:#9aa3ad;--bd:#2c323a;--ac:#6ea0ff;--me:#1f3358;--ok:#4ade80;--warn:#fbbf24}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;justify-content:center}
+.app{width:100%;max-width:560px;height:100%;display:flex;flex-direction:column;background:var(--card);border-inline:1px solid var(--bd)}
+header{padding:12px 14px;border-bottom:1px solid var(--bd)}
+header b{font-size:17px}
+#status{font-size:12px;color:var(--mut)}
+.screen{flex:1;display:flex;flex-direction:column;min-height:0}
+.hide{display:none!important}
+.setup{padding:20px;display:flex;flex-direction:column;gap:18px}
+.box{border:1px solid var(--bd);border-radius:12px;padding:14px;background:var(--bg)}
+.box h3{margin:0 0 8px;font-size:14px;color:var(--mut);font-weight:600}
+.code{font:700 30px ui-monospace,Menlo,monospace;letter-spacing:6px}
+input[type=text]{padding:10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx);font:inherit;min-width:0}
+button,label.b{border:0;border-radius:10px;padding:10px 14px;background:var(--ac);color:#fff;font:inherit;cursor:pointer}
+button.sec{background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+.row{display:flex;gap:8px}.row input{flex:1}
+#fp{padding:10px 14px;border-bottom:1px solid var(--bd);font-size:13px;background:var(--bg)}
+#fp code{display:block;font:700 15px ui-monospace,Menlo,monospace;letter-spacing:1px;margin:4px 0;word-break:break-word}
+#fp.v{color:var(--ok)}#fp:not(.v){color:var(--warn)}
+#log{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:6px;background:var(--bg)}
+.m{max-width:80%;padding:6px 10px;border-radius:12px;background:var(--card);border:1px solid var(--bd);word-break:break-word}
+.m.me{align-self:flex-end;background:var(--me);border-color:transparent}
+.m small{display:block;color:var(--mut);font-size:11px}
+.sys{align-self:center;color:var(--mut);font-size:12px}
+progress{width:100%;height:8px}
+form{display:flex;gap:6px;padding:10px;border-top:1px solid var(--bd)}
+form input[type=text]{flex:1}
+label.b{background:var(--bg);color:var(--tx);border:1px solid var(--bd);display:flex;align-items:center}
+</style>
+</head>
+<body>
+<div class="app">
+<header><b>🔐 SecureChat</b><div id="status">Starting…</div></header>
+
+<!-- Screen 1: connect with a code -->
+<div class="screen setup" id="setup">
+  <div class="box"><h3>1. YOUR CODE (share with your friend)</h3>
+    <div class="code" id="mycode">······</div>
+    <div class="row" style="margin-top:10px"><button class="sec" id="copy">Copy code</button></div></div>
+  <div class="box"><h3>2. OR ENTER FRIEND&rsquo;S CODE</h3>
+    <div class="row"><input type="text" id="theircode" maxlength="6" placeholder="e.g. K7M2QX" autocapitalize="characters" autocomplete="off"><button id="connect">Connect</button></div></div>
+  <div class="box" style="font-size:13px;color:var(--mut)">Open this same file on both devices. One person shares their code, the other enters it. Messages go directly device-to-device and are end-to-end encrypted (ECDH + AES-256-GCM).</div>
+</div>
+
+<!-- Screen 2: chat -->
+<div class="screen hide" id="chat">
+  <div id="fp"></div>
+  <div id="log"></div>
+  <form id="f"><label class="b" title="Send file">📎<input id="file" type="file" hidden></label>
+  <input type="text" id="msg" placeholder="Type a message" autocomplete="off"><button>Send</button></form>
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $=s=>document.querySelector(s),E=new TextEncoder(),D=new TextDecoder();
+const b64=u=>{u=new Uint8Array(u);let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode(...u.subarray(i,i+8192));return btoa(s)};
+const ub=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const newCode=()=>Array.from(crypto.getRandomValues(new Uint8Array(6)),x=>'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[x%31]).join('');
+const status=t=>$('#status').textContent=t;
+
+let peer,conn,kp,pubB64,key,files={};
+
+/* ---------- connection (PeerJS is used only to find the other device) ---------- */
+function start(){
+  const code=newCode();
+  peer=new Peer('sc-'+code);
+  peer.on('open',()=>{$('#mycode').textContent=code;status('Ready · waiting for connection')});
+  peer.on('error',e=>{if(e.type==='unavailable-id')return start();
+    status(e.type==='peer-unavailable'?'Code not found. Check it and try again.':'Error: '+e.type)});
+  peer.on('connection',c=>attach(c));
+}
+function attach(c){
+  if(conn&&conn.open){c.close();return}
+  conn=c;
+  c.on('open',handshake);
+  c.on('data',onData);
+  c.on('close',()=>{sys('Connection closed');status('Disconnected');key=null});
+}
+$('#connect').onclick=()=>{
+  const code=$('#theircode').value.trim().toUpperCase();
+  if(code.length!==6)return status('Enter the 6-character code');
+  status('Connecting…');attach(peer.connect('sc-'+code,{serialization:'json',reliable:true}));
+};
+$('#copy').onclick=()=>navigator.clipboard.writeText($('#mycode').textContent).then(()=>status('Code copied'));
+
+/* ---------- crypto: ECDH P-256 key exchange -> AES-256-GCM ---------- */
+async function handshake(){
+  kp=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveKey']);
+  pubB64=b64(await crypto.subtle.exportKey('raw',kp.publicKey));
+  conn.send({t:'k',pub:pubB64});
+}
+async function onKey(theirB64){
+  const rk=await crypto.subtle.importKey('raw',ub(theirB64),{name:'ECDH',namedCurve:'P-256'},false,[]);
+  key=await crypto.subtle.deriveKey({name:'ECDH',public:rk},kp.privateKey,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  const h=new Uint8Array(await crypto.subtle.digest('SHA-256',E.encode([pubB64,theirB64].sort().join('|'))));
+  const fp=[...h.slice(0,12)].map(x=>x.toString(16).padStart(2,'0').toUpperCase()).join('').match(/.{4}/g).join(' ');
+  $('#setup').classList.add('hide');$('#chat').classList.remove('hide');
+  status('🔒 Encrypted connection');
+  const box=$('#fp');box.className='';
+  box.innerHTML='<b>Verify fingerprint</b> – ask your friend (call / WhatsApp) to read theirs. It must be identical:<code></code><button class="sec" id="ver">✔ It matches</button>';
+  box.querySelector('code').textContent=fp;
+  $('#ver').onclick=()=>{box.className='v';box.textContent='✔ Verified: '+fp};
+}
+async function seal(o){
+  if(!key||!conn?.open){sys('Not connected');return false}
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,E.encode(JSON.stringify(o))));
+  const all=new Uint8Array(12+ct.length);all.set(iv);all.set(ct,12);
+  while(conn.dataChannel&&conn.dataChannel.bufferedAmount>1e6)await sleep(30);
+  conn.send({t:'e',d:b64(all)});return true;
+}
+async function onData(p){
+  if(p.t==='k')return onKey(p.pub);
+  if(p.t!=='e'||!key)return;
+  let m;try{const u=ub(p.d);m=JSON.parse(D.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:u.subarray(0,12)},key,u.subarray(12))))}
+  catch{return sys('⚠️ A message failed to decrypt (possible tampering)')}
+  if(m.k==='msg')bubble(m.text,0);
+  else if(m.k==='file')receiveChunk(m);
+}
+
+/* ---------- UI helpers ---------- */
+function put(el){$('#log').appendChild(el);$('#log').scrollTop=1e9}
+function bubble(body,mine,label){const d=document.createElement('div');d.className='m'+(mine?' me':'');
+  const s=document.createElement('small');s.textContent=mine?'You':'Friend';d.append(s,body);put(d);return d}
+function sys(t){const d=document.createElement('div');d.className='sys';d.textContent=t;put(d)}
+
+/* ---------- text ---------- */
+$('#f').onsubmit=async e=>{e.preventDefault();const t=$('#msg').value.trim();
+  if(t&&await seal({k:'msg',text:t})){bubble(t,1);$('#msg').value=''}};
+
+/* ---------- files (each 8 KB chunk is encrypted separately) ---------- */
+const CH=8000;
+$('#file').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';if(!f||!key)return;
+  if(f.size>50e6)return sys('Max file size is 50 MB');
+  const buf=new Uint8Array(await f.arrayBuffer()),n=Math.max(1,Math.ceil(buf.length/CH)),id=crypto.randomUUID();
+  const pr=document.createElement('progress');pr.max=n;pr.value=0;
+  const box=document.createElement('div');box.textContent='📎 '+f.name+' ('+Math.ceil(f.size/1024)+' KB)';box.appendChild(pr);bubble(box,1);
+  for(let i=0;i<n;i++){
+    if(!await seal({k:'file',id,i,n,name:f.name,mime:f.type,b:b64(buf.subarray(i*CH,(i+1)*CH))}))return;
+    pr.value=i+1;
+  }
+};
+function receiveChunk(m){
+  let f=files[m.id];
+  if(!f){const pr=document.createElement('progress'),box=document.createElement('div');pr.max=m.n;pr.value=0;
+    box.textContent='📎 Receiving '+m.name;box.appendChild(pr);f=files[m.id]={parts:[],c:0,pr,box};bubble(box,0)}
+  f.parts[m.i]=ub(m.b);f.c++;f.pr.value=f.c;
+  if(f.c===m.n){
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(f.parts,{type:m.mime}));a.download=m.name;a.textContent='⬇ Download '+m.name;
+    f.box.replaceChildren(a);delete files[m.id];
+  }
+}
+
+start();
+</script>
+</body>
+</html>
